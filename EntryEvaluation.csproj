@@ -8,8 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove=".github\**" />
     <Compile Remove="EntryEvaluation.Tests\**" />
+    <EmbeddedResource Remove=".github\**" />
     <EmbeddedResource Remove="EntryEvaluation.Tests\**" />
+    <None Remove=".github\**" />
     <None Remove="EntryEvaluation.Tests\**" />
   </ItemGroup>
 
@@ -26,10 +29,6 @@
     <Content Include="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Include=".github\copilot-instructions.md" />
   </ItemGroup>
 
   <ItemGroup>
