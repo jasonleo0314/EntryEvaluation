@@ -1,0 +1,4 @@
+﻿<Solution>
+  <Project Path="EntryEvaluation.csproj" />
+  <Project Path="EntryEvaluation.Tests/EntryEvaluation.Tests.csproj" />
+</Solution>

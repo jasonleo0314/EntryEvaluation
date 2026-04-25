@@ -1,0 +1,16 @@
+﻿CategoryId,CategoryName,CategoryMaxPoints,SubId,Phase,SubTitle,SubDescription
+C1,类别01,10,S1.1,ReadDocs,子项01,一般说明
+C1,类别01,10,S1.2,ReadDocs,子项02,一般说明
+C1,类别01,10,S1.3,ReadDocs,子项03,一般说明
+C2,类别02,30,S2.1,EnterUI,子项04,一般说明
+C2,类别02,30,S2.2,ImportData,子项05,一般说明
+C2,类别02,30,S2.3,ImportData,子项06,一般说明
+C2,类别02,30,S2.4,RunModel,子项07,一般说明
+C2,类别02,30,S2.5,GetResults,子项08,一般说明
+C2,类别02,30,S2.6,RunModel,子项09,一般说明
+C3,类别03,40,S3.1,UnderstandResults,子项10,一般说明
+C3,类别03,40,S3.2,UnderstandResults,子项11,一般说明
+C3,类别03,40,S3.3,UnderstandResults,子项12,一般说明
+C4,类别04,20,S4.1,ReadDocs,子项13,一般说明
+C4,类别04,20,S4.2,RunModel,子项14,一般说明
+C4,类别04,20,S4.3,GetResults,子项15,一般说明
