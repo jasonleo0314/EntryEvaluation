@@ -118,11 +118,93 @@ public class IntegrationTests
         Assert.NotEmpty(Directory.GetFiles(Path.Combine(tempDir, "Audit"), "*.jsonl"));
     }
 
+    [Fact]
+    public void EndToEnd_StandardizedResults_AreWrittenFromStandardizedReviews()
+    {
+        var tempDir = CreateTempDirectory();
+        var criteriaSet = CriteriaCsvLoader.LoadFromText(TestFixture.SampleCriteriaCsv);
+        var reviews = new[]
+        {
+            ResultsCsvWriterTestsAccessor.MakeReview(criteriaSet, "工具A", 0),
+            ResultsCsvWriterTestsAccessor.MakeReview(criteriaSet, "工具B", 3)
+        };
+        var standardizedPath = Path.Combine(tempDir, "results_standardized.csv");
+
+        var standardizedReviews = ScoreStandardizer.Standardize(criteriaSet.Categories, reviews);
+        ResultsCsvWriter.Write(standardizedPath, criteriaSet.Categories, criteriaSet.SubCriteria, standardizedReviews);
+
+        var rows = CsvParser.ParseFile(standardizedPath);
+        Assert.Equal(3, rows.Count);
+
+        for (var rowIndex = 1; rowIndex < rows.Count; rowIndex++)
+        {
+            var review = standardizedReviews[rowIndex - 1];
+            Assert.Equal(review.EntryName, rows[rowIndex][0]);
+            Assert.Equal(review.TotalScore.ToString("F1"), rows[rowIndex][^2]);
+        }
+    }
+
+    [Fact]
+    public void ProgressStore_WhenReviewingSameEntryAgain_ReplacesCompletedReview()
+    {
+        var tempDir = CreateTempDirectory();
+        var criteriaSet = CriteriaCsvLoader.LoadFromText(TestFixture.SampleCriteriaCsv);
+        var progressStore = new ProgressStore(Path.Combine(tempDir, "progress.json"));
+        var originalReview = ResultsCsvWriterTestsAccessor.MakeReview(criteriaSet, "重复评分工具", 1);
+        var updatedReview = ResultsCsvWriterTestsAccessor.MakeReview(criteriaSet, "重复评分工具", 3);
+        var otherReview = ResultsCsvWriterTestsAccessor.MakeReview(criteriaSet, "其他工具", 2);
+        var completedReviews = new List<EntryReview> { originalReview, otherReview };
+
+        ReplaceCompletedReview(completedReviews, updatedReview);
+        progressStore.Save(new ReviewProgress(completedReviews, null));
+
+        var savedProgress = progressStore.Load();
+        var savedReview = Assert.Single(savedProgress.CompletedReviews.Where(r => r.EntryName == updatedReview.EntryName));
+        Assert.Equal(2, savedProgress.CompletedReviews.Count);
+        Assert.Equal(updatedReview.TotalScore, savedReview.TotalScore);
+    }
+
+    private static class ResultsCsvWriterTestsAccessor
+    {
+        public static EntryReview MakeReview(
+            CriteriaSet set,
+            string name,
+            int allScore)
+        {
+            var weights = TestFixture.LoadSampleWeightSnapshot();
+            var calc = new ScoreCalculator(set.Categories, set.SubCriteria, weights.NormalizedWeights);
+            var raw = TestFixture.AllScores(set, allScore);
+            var result = calc.Compute(raw);
+
+            return new EntryReview(
+                name,
+                DateTimeOffset.Now,
+                [],
+                result.CategoryScores,
+                result.TotalScore,
+                new Dictionary<string, string?>(StringComparer.Ordinal),
+                null,
+                weights.NormalizedWeights);
+        }
+    }
+
     private static string CreateTempDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), $"trh_integration_{Guid.NewGuid():N}");
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static void ReplaceCompletedReview(List<EntryReview> reviews, EntryReview review)
+    {
+        var existingIndex = reviews.FindIndex(r => string.Equals(r.EntryName, review.EntryName, StringComparison.Ordinal));
+        if (existingIndex >= 0)
+        {
+            reviews[existingIndex] = review;
+            return;
+        }
+
+        reviews.Add(review);
     }
 
     private static List<string> BuildReviewInputs(

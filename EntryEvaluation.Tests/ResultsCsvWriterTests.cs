@@ -96,4 +96,36 @@ public class ResultsCsvWriterTests
         var rows = CsvParser.Parse(new StringReader(text));
         Assert.Single(rows);
     }
+
+    [Fact]
+    public void BuildCsvText_WithStandardizedReviews_WritesStandardizedCategoryScoresAndTotal()
+    {
+        var set = TestFixture.LoadSample();
+        var rawReviews = new[]
+        {
+            MakeReview(set, "工具A", 0),
+            MakeReview(set, "工具B", 3)
+        };
+
+        var standardizedReviews = ScoreStandardizer.Standardize(set.Categories, rawReviews);
+
+        var text = ResultsCsvWriter.BuildCsvText(set.Categories, set.SubCriteria, standardizedReviews);
+        var rows = CsvParser.Parse(new StringReader(text));
+
+        Assert.Equal(3, rows.Count);
+
+        for (var rowIndex = 1; rowIndex < rows.Count; rowIndex++)
+        {
+            var review = standardizedReviews[rowIndex - 1];
+            Assert.Equal(review.EntryName, rows[rowIndex][0]);
+
+            for (var categoryIndex = 0; categoryIndex < set.Categories.Count; categoryIndex++)
+            {
+                var category = set.Categories[categoryIndex];
+                Assert.Equal(review.CategoryScores[category.Id].ToString("F1"), rows[rowIndex][1 + categoryIndex]);
+            }
+
+            Assert.Equal(review.TotalScore.ToString("F1"), rows[rowIndex][^2]);
+        }
+    }
 }

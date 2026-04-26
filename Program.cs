@@ -38,19 +38,23 @@ catch (JsonException ex)
 var criteriaPath = ArgValue(args, "--criteria") ?? ResolveDefaultDataPath(settings.Paths.CriteriaFileName);
 var toolsPath = ArgValue(args, "--Entries") ?? ResolveDefaultDataPath(settings.Paths.EntriesFileName);
 var weightsPath = ArgValue(args, "--weights") ?? ResolveDefaultDataPath(settings.Paths.WeightsFileName);
-var outPath = ArgValue(args, "--out")
+var configuredOutPath = ArgValue(args, "--out");
+var outPath = configuredOutPath
     ?? BuildRawOutputPath(settings.Paths);
-var standardizedOutPath = ArgValue(args, "--standardized-out")
+var configuredStandardizedOutPath = ArgValue(args, "--standardized-out");
+var standardizedOutPath = configuredStandardizedOutPath
     ?? BuildStandardizedOutputPath(outPath, settings.Paths.StandardizedResultsSuffix);
 var progressPath = ArgValue(args, "--progress")
     ?? Path.Combine(AppContext.BaseDirectory, settings.Paths.ProgressFileName);
 
 CriteriaSet? criteriaSet = null;
+IReadOnlyList<Entry> entries = [];
 var summary = new List<EntryReview>();
 var resultWritten = false;
 var standardizedResultWritten = false;
 var shutdownRequested = false;
 var resultWriteLock = new object();
+var resultsDirty = false;
 
 Console.CancelKeyPress += (_, eventArgs) =>
 {
@@ -84,12 +88,11 @@ try
     infoPanel.AddRow("[grey]进度文件[/]",         $"[grey]{Markup.Escape(progressPath)}[/]");
     AnsiConsole.Write(infoPanel);
 
-    IReadOnlyList<Entry> Entries;
     IReadOnlyDictionary<string, double> defaultWeights;
     try
     {
         criteriaSet = CriteriaCsvLoader.Load(criteriaPath);
-        Entries = EntriesCsvLoader.Load(toolsPath);
+        entries = EntriesCsvLoader.Load(toolsPath);
         defaultWeights = WeightsCsvLoader.Load(weightsPath);
     }
     catch (IOException ex)
@@ -128,7 +131,7 @@ try
     summary.AddRange(progress.CompletedReviews);
 
     WeightSnapshot weights;
-    var resumeReview = TryGetResumeReview(prompt, progress, Entries);
+    var resumeReview = TryGetResumeReview(prompt, progress, entries);
     if (resumeReview is not null)
     {
         weights = new WeightSnapshot(resumeReview.RawWeights, resumeReview.FinalWeights);
@@ -150,22 +153,32 @@ try
             resumedTool,
             resumeReview,
             current => progressStore.Save(new ReviewProgress(summary, current)));
-        summary.Add(review);
+        UpsertReview(summary, review);
         progressStore.Save(new ReviewProgress(summary, null));
+        MarkResultsDirty();
         prompt.WriteMarkupLine("[green]✓ 已完成恢复评审，并更新进度文件。[/]");
+        if (AllToolsReviewed(entries, summary))
+        {
+            if (!TryWriteFinalResults())
+            {
+                return 2;
+            }
+
+            prompt.WriteMarkupLine($"[green bold]✓ 所有{Markup.Escape(entryNoun)}均已完成评审，已重新写出最终计分表。可继续重新评审，或输入 q 退出。[/]");
+        }
     }
 
     // 参选项目列表
     prompt.WriteLine();
     var entryTable = new Table()
         .Border(TableBorder.Rounded)
-        .Title($"[bold cyan]{Markup.Escape(entryNoun)}列表（共 {Entries.Count} 项）[/]")
+        .Title($"[bold cyan]{Markup.Escape(entryNoun)}列表（共 {entries.Count} 项）[/]")
         .AddColumn(new TableColumn("[bold]序号[/]").RightAligned())
         .AddColumn(new TableColumn($"[bold]{Markup.Escape(entryNoun)}名称[/]"));
     var completedNames = summary.Select(r => r.EntryName).ToHashSet(StringComparer.Ordinal);
-    for (var i = 0; i < Entries.Count; i++)
+    for (var i = 0; i < entries.Count; i++)
     {
-        var name = Entries[i].Name;
+        var name = entries[i].Name;
         var label = completedNames.Contains(name)
             ? $"[green]{Markup.Escape(name)} ✓[/]"
             : Markup.Escape(name);
@@ -184,37 +197,42 @@ try
         if (line.Equals("q", StringComparison.OrdinalIgnoreCase)) break;
         if (line.Equals("s", StringComparison.OrdinalIgnoreCase))
         {
-            PrintSummary(prompt, summary, Entries);
+            PrintSummary(prompt, summary, entries);
             continue;
         }
-        if (!int.TryParse(line, out var idx) || idx < 1 || idx > Entries.Count)
+        if (!int.TryParse(line, out var idx) || idx < 1 || idx > entries.Count)
         {
-            prompt.WriteMarkupLine($"[red]无效输入，请输入 1~{Entries.Count} 或 q/s。[/]");
+            prompt.WriteMarkupLine($"[red]无效输入，请输入 1~{entries.Count} 或 q/s。[/]");
             continue;
         }
 
         var review = workflow.ReviewOne(
-            Entries[idx - 1],
+            entries[idx - 1],
             resume: null,
             current => progressStore.Save(new ReviewProgress(summary, current)));
-        summary.Add(review);
+        UpsertReview(summary, review);
         progressStore.Save(new ReviewProgress(summary, null));
-        if (AllToolsReviewed(Entries, summary))
+        MarkResultsDirty();
+        if (AllToolsReviewed(entries, summary))
         {
-            prompt.WriteMarkupLine($"[green bold]✓ 所有{Markup.Escape(entryNoun)}均已完成评审，将写出最终计分表。[/]");
-            break;
+            if (!TryWriteFinalResults())
+            {
+                return 2;
+            }
+
+            prompt.WriteMarkupLine($"[green bold]✓ 所有{Markup.Escape(entryNoun)}均已完成评审，已重新写出最终计分表。可继续重新评审，或输入 q 退出。[/]");
         }
     }
 
-    PrintSummary(prompt, summary, Entries);
-    if (AllToolsReviewed(Entries, summary))
+    PrintSummary(prompt, summary, entries);
+    if (AllToolsReviewed(entries, summary) && resultsDirty)
     {
         if (!TryWriteFinalResults())
         {
             return 2;
         }
     }
-    else if (!TryWriteResultsSnapshot("退出时"))
+    else if (!AllToolsReviewed(entries, summary) && !TryWriteResultsSnapshot("退出时"))
     {
         return 2;
     }
@@ -290,16 +308,68 @@ static string BuildStandardizedOutputPath(string rawOutputPath, string suffix)
         $"{fileName}{suffix}{extension}");
 }
 
-void PrintSummary(IPrompt p, IReadOnlyList<EntryReview> all, IReadOnlyList<Entry>? entries = null)
+static string BuildUniqueOutputPath(string path)
+{
+    if (!File.Exists(path))
+    {
+        return path;
+    }
+
+    var dir = Path.GetDirectoryName(path);
+    var fileName = Path.GetFileNameWithoutExtension(path);
+    var extension = Path.GetExtension(path);
+    var timestamp = DateTimeOffset.Now.ToString("yyyyMMdd_HHmmss_fff");
+    var candidate = Path.Combine(
+        string.IsNullOrEmpty(dir) ? string.Empty : dir,
+        $"{fileName}_{timestamp}{extension}");
+    var index = 1;
+    while (File.Exists(candidate))
+    {
+        candidate = Path.Combine(
+            string.IsNullOrEmpty(dir) ? string.Empty : dir,
+            $"{fileName}_{timestamp}_{index}{extension}");
+        index++;
+    }
+
+    return candidate;
+}
+
+static void UpsertReview(List<EntryReview> reviews, EntryReview review)
+{
+    var existingIndex = reviews.FindIndex(r => string.Equals(r.EntryName, review.EntryName, StringComparison.Ordinal));
+    if (existingIndex >= 0)
+    {
+        reviews[existingIndex] = review;
+        return;
+    }
+
+    reviews.Add(review);
+}
+
+void MarkResultsDirty()
+{
+    resultWritten = false;
+    standardizedResultWritten = false;
+    resultsDirty = true;
+}
+
+void PrintSummary(
+    IPrompt p,
+    IReadOnlyList<EntryReview> all,
+    IReadOnlyList<Entry>? entries = null,
+    string title = "评审汇总")
 {
     var entryNoun = settings.Display.EntryNounSingular;
     p.WriteLine();
-    p.WriteRule("评审汇总");
+    p.WriteRule(title);
 
     var completedNames = all
         .Select(r => r.EntryName)
         .ToHashSet(StringComparer.Ordinal);
     var totalCount = entries?.Count ?? all.Count;
+    var entryOrder = entries?
+        .Select((entry, index) => new { entry.Name, Sequence = index + 1 })
+        .ToDictionary(item => item.Name, item => item.Sequence, StringComparer.Ordinal);
     var pending = entries is null
         ? Array.Empty<Entry>()
         : entries.Where(t => !completedNames.Contains(t.Name)).ToArray();
@@ -307,6 +377,7 @@ void PrintSummary(IPrompt p, IReadOnlyList<EntryReview> all, IReadOnlyList<Entry
     var table = new Table()
         .Border(TableBorder.Rounded)
         .Title($"[bold]已完成 {all.Count}/{totalCount} 项[/]")
+        .AddColumn(new TableColumn("[bold]序号[/]").RightAligned())
         .AddColumn(new TableColumn("[bold]排名[/]").RightAligned())
         .AddColumn(new TableColumn($"[bold]{Markup.Escape(entryNoun)}名称[/]"))
         .AddColumn(new TableColumn("[bold]总分[/]").RightAligned())
@@ -314,7 +385,7 @@ void PrintSummary(IPrompt p, IReadOnlyList<EntryReview> all, IReadOnlyList<Entry
 
     if (all.Count == 0)
     {
-        table.AddRow("[grey]-[/]", $"[grey]（暂无已完成{Markup.Escape(entryNoun)}）[/]", "[grey]-[/]", "[grey]-[/]");
+        table.AddRow("[grey]-[/]", "[grey]-[/]", $"[grey]（暂无已完成{Markup.Escape(entryNoun)}）[/]", "[grey]-[/]", "[grey]-[/]");
     }
     else
     {
@@ -322,8 +393,11 @@ void PrintSummary(IPrompt p, IReadOnlyList<EntryReview> all, IReadOnlyList<Entry
         for (var i = 0; i < ranked.Count; i++)
         {
             var r = ranked[i];
+            var sequenceLabel = entryOrder is not null && entryOrder.TryGetValue(r.EntryName, out var sequence)
+                ? $"[grey]{sequence}[/]"
+                : "[grey]-[/]";
             var rankLabel = i == 0 ? "[gold1 bold]🥇 1[/]" : i == 1 ? "[silver bold]🥈 2[/]" : i == 2 ? "[#cd7f32 bold]🥉 3[/]" : $"[grey]{i + 1}[/]";
-            table.AddRow(rankLabel, Markup.Escape(r.EntryName), $"[cyan bold]{r.TotalScore:F1}[/]", "[green]✓ 已完成[/]");
+            table.AddRow(sequenceLabel, rankLabel, Markup.Escape(r.EntryName), $"[cyan bold]{r.TotalScore:F1}[/]", "[green]✓ 已完成[/]");
         }
     }
 
@@ -331,7 +405,10 @@ void PrintSummary(IPrompt p, IReadOnlyList<EntryReview> all, IReadOnlyList<Entry
     {
         foreach (var e in pending)
         {
-            table.AddRow("[grey]-[/]", Markup.Escape(e.Name), "[grey]-[/]", "[yellow]○ 待评审[/]");
+            var sequenceLabel = entryOrder!.TryGetValue(e.Name, out var sequence)
+                ? $"[grey]{sequence}[/]"
+                : "[grey]-[/]";
+            table.AddRow(sequenceLabel, "[grey]-[/]", Markup.Escape(e.Name), "[grey]-[/]", "[yellow]○ 待评审[/]");
         }
     }
 
@@ -349,8 +426,10 @@ bool TryWriteResultsSnapshot(string reason)
 
         try
         {
+            outPath = BuildUniqueOutputPath(configuredOutPath ?? BuildRawOutputPath(settings.Paths));
             ResultsCsvWriter.Write(outPath, criteriaSet.Categories, criteriaSet.SubCriteria, summary, settings.Display);
             resultWritten = true;
+            standardizedResultWritten = false;
             prompt.WriteMarkupLine($"[green]✓ {Markup.Escape(reason)}汇总 CSV 已写出：{Markup.Escape(outPath)}[/]");
             return true;
         }
@@ -393,6 +472,9 @@ bool TryWriteFinalResults()
                 summary,
                 settings.Scoring,
                 settings.Standardization);
+            standardizedOutPath = BuildUniqueOutputPath(
+                configuredStandardizedOutPath
+                ?? BuildStandardizedOutputPath(outPath, settings.Paths.StandardizedResultsSuffix));
             ResultsCsvWriter.Write(
                 standardizedOutPath,
                 criteriaSet.Categories,
@@ -400,7 +482,9 @@ bool TryWriteFinalResults()
                 standardizedReviews,
                 settings.Display);
             standardizedResultWritten = true;
+            resultsDirty = false;
             prompt.WriteMarkupLine($"[green]✓ 最终标准化汇总 CSV 已写出：{Markup.Escape(standardizedOutPath)}[/]");
+            PrintSummary(prompt, standardizedReviews, entries, "标准化汇总");
             return true;
         }
         catch (IOException ex)
